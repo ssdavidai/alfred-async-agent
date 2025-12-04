@@ -140,7 +140,7 @@ export async function transaction<T>(
   operations: (tx: PrismaClient) => Promise<T>
 ): Promise<T> {
   const client = getPrismaClient();
-  return client.$transaction(async (tx) => {
+  return client.$transaction(async (tx: any) => {
     return operations(tx as PrismaClient);
   });
 }

@@ -179,7 +179,7 @@ export async function createSkillExecution(
 ) {
   const client = getPrismaClient();
 
-  return client.$transaction(async (tx) => {
+  return client.$transaction(async (tx: any) => {
     // Create execution record
     const execution = await tx.execution.create({
       data: {
