@@ -19,8 +19,8 @@ FROM node:20-alpine AS runner
 
 WORKDIR /app
 
-# Install curl for healthcheck
-RUN apk add --no-cache curl
+# Install curl for healthcheck and openssl for Prisma
+RUN apk add --no-cache curl openssl
 
 # Copy built files and dependencies
 COPY --from=builder /app/dist ./dist
