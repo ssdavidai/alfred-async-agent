@@ -177,7 +177,7 @@ export async function getAllWorkflows(): Promise<
 
     console.log(`[DB] Fetched ${skills.length} active skills as workflows`);
 
-    return skills.map((skill) => ({
+    return skills.map((skill: { id: string; name: string; description: string | null }) => ({
       id: skill.id,
       name: skill.name,
       description: skill.description || '',
@@ -333,7 +333,18 @@ export async function getExecutionsForSkill(
       take: limit,
     });
 
-    return executions.map((e) => ({
+    return executions.map((e: {
+      id: string;
+      skillId: string;
+      status: string;
+      trigger: string;
+      input: unknown;
+      output: string | null;
+      trace: unknown;
+      error: string | null;
+      durationMs: number | null;
+      tokenCount: number | null;
+    }) => ({
       skillId: e.skillId,
       requestId: (e.input as any)?.requestId || e.id,
       status: e.status as ExecutionRecord['status'],
