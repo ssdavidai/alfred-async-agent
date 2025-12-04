@@ -13,7 +13,7 @@ import {
   uploadAllFiles,
   cleanupWorkingDirectory,
 } from './files.js';
-import { upsertResult } from './database.js';
+import { upsertResult, createExecution, updateExecution } from './database.js';
 import { AgentError, ValidationError } from './utils/errors.js';
 import { logger, getCorrelationId } from './middleware/logging.js';
 import { metrics } from './utils/monitoring.js';
@@ -141,6 +141,7 @@ async function processWebhook(
   startTime: number
 ): Promise<WebhookResponse> {
   let workingDirectory: string | null = null;
+  let executionId: string | null = null;
 
   try {
     // Get MCP connections from request (set by connections middleware)
@@ -202,6 +203,22 @@ async function processWebhook(
 
     let agentResponse: string;
     let conversationTrace: any[] | undefined;
+
+    // Create execution record if skill was matched
+    if (classification.workflowId && classification.workflowData) {
+      try {
+        executionId = await createExecution({
+          skillId: classification.workflowId,
+          requestId,
+          trigger: 'webhook',
+          input: { prompt, metadata, requestId },
+        });
+        logger.info(correlationId, 'execution', `Created execution ${executionId}`);
+      } catch (error: any) {
+        logger.warn(correlationId, 'execution', `Failed to create execution: ${error.message}`);
+        // Non-fatal - continue execution
+      }
+    }
 
     try {
       // Branch based on classification
@@ -300,7 +317,7 @@ async function processWebhook(
       );
     }
 
-    // Store result in database
+    // Store result in database and update execution
     logger.info(correlationId, 'database', 'Storing result');
 
     try {
@@ -308,9 +325,21 @@ async function processWebhook(
         requestId,
         text: agentResponse,
         files: uploadedFiles,
-        metadata,
+        metadata: { ...metadata, executionId },
       });
       logger.info(correlationId, 'database', 'Result stored successfully');
+
+      // Update execution record with success
+      if (executionId) {
+        const durationMs = Date.now() - startTime;
+        await updateExecution(executionId, {
+          status: 'completed',
+          output: agentResponse,
+          trace: conversationTrace,
+          durationMs,
+        });
+        logger.info(correlationId, 'execution', `Execution ${executionId} completed`);
+      }
     } catch (error: any) {
       // Database failure is non-fatal
       logger.error(correlationId, 'database', 'Database upsert error (non-fatal)', {
@@ -360,6 +389,18 @@ async function processWebhook(
 
     metrics.recordRequest(false, Date.now() - startTime);
     metrics.recordError(error.name || 'UnknownError');
+
+    // Update execution with failure if we have an execution ID
+    if (executionId) {
+      const durationMs = Date.now() - startTime;
+      await updateExecution(executionId, {
+        status: 'failed',
+        error: error.message,
+        durationMs,
+      }).catch((updateErr) => {
+        logger.warn(correlationId, 'execution', `Failed to update execution on error: ${updateErr.message}`);
+      });
+    }
 
     if (workingDirectory) {
       cleanupWorkingDirectory(workingDirectory).catch((cleanupErr) => {

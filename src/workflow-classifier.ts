@@ -1,20 +1,32 @@
 /**
  * Workflow Classifier
  *
- * Uses Claude to classify if a user prompt matches a known workflow.
- * Workflows are fetched from Supabase.
+ * Uses Claude to classify if a user prompt matches a known skill/workflow.
+ * Skills are fetched from local Postgres database.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
 import { getAllWorkflows, getWorkflowById } from './database.js';
+import { getAnthropicApiKey } from './config.js';
 import { ClassificationResult, Workflow } from './types.js';
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
 
 const CLASSIFIER_MODEL =
   process.env.CLASSIFIER_MODEL || 'claude-haiku-4-5-20251001';
+
+/**
+ * Get Anthropic client with API key from database or environment
+ */
+async function getAnthropicClient(): Promise<Anthropic> {
+  // Try to get API key from database first
+  const dbApiKey = await getAnthropicApiKey();
+  const apiKey = dbApiKey || process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('No Anthropic API key configured. Set it via /api/config or ANTHROPIC_API_KEY env var.');
+  }
+
+  return new Anthropic({ apiKey });
+}
 
 /**
  * Classify user prompt to determine if it matches a workflow
@@ -73,6 +85,7 @@ RULES:
 
     console.log('[Classifier] Sending classification request to Claude');
 
+    const anthropic = await getAnthropicClient();
     const response = await anthropic.messages.create({
       model: CLASSIFIER_MODEL,
       max_tokens: 300,

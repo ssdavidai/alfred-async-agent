@@ -1,96 +1,144 @@
 /**
  * Database Operations Module
  *
- * Handles storage of agent results in Supabase.
+ * Handles skill/workflow fetching and execution tracking using local Prisma/Postgres.
+ * Replaces external Supabase with local VM database.
  */
 
-import { getSupabaseClient, isSupabaseConfigured } from './shared/supabase.js';
-import { FileMetadata, ResultRecord, Workflow } from './types.js';
+import { getPrismaClient, healthCheck } from './db/client.js';
+import { FileMetadata, Workflow, WorkflowStep } from './types.js';
 
 /**
- * Insert result record to database
- *
- * @param record - Result record to store
+ * Execution record for tracking skill runs
  */
-export async function upsertResult(record: ResultRecord): Promise<void> {
-  if (!isSupabaseConfigured()) {
-    console.warn('[DB] Supabase not configured - skipping database insert');
-    return;
-  }
+export interface ExecutionRecord {
+  skillId: string;
+  requestId: string;
+  status: 'running' | 'completed' | 'failed';
+  trigger: 'webhook' | 'manual' | 'schedule' | 'chat';
+  input?: Record<string, any>;
+  output?: string;
+  trace?: any[];
+  files?: FileMetadata[];
+  error?: string;
+  durationMs?: number;
+  tokenCount?: number;
+}
 
+/**
+ * Create a new execution record when starting a skill run
+ *
+ * @param record - Initial execution data
+ * @returns Created execution ID
+ */
+export async function createExecution(record: {
+  skillId: string;
+  requestId: string;
+  trigger: ExecutionRecord['trigger'];
+  input?: Record<string, any>;
+}): Promise<string> {
   try {
-    console.log(`[DB] Inserting result for requestId: ${record.requestId}`);
-    console.log(`[DB]   - Files count: ${record.files.length}`);
-    console.log(`[DB]   - Text length: ${record.text.length} chars`);
+    const prisma = getPrismaClient();
 
-    const supabase = getSupabaseClient();
-    const { error } = await supabase
-      .from('results')
-      .insert({
-        request_id: record.requestId,
-        text: record.text,
-        files: record.files,
-        metadata: record.metadata || {},
-        created_at: new Date().toISOString(),
-      })
-      .select();
+    const execution = await prisma.execution.create({
+      data: {
+        skillId: record.skillId,
+        status: 'running',
+        trigger: record.trigger,
+        input: record.input || {},
+        startedAt: new Date(),
+      },
+    });
 
-    if (error) {
-      console.error(`[DB] Error inserting result:`, error);
-      throw new Error(`Database insert failed: ${error.message}`);
-    }
-
-    console.log(`[DB] Successfully inserted result for requestId: ${record.requestId}`);
+    console.log(`[DB] Created execution ${execution.id} for skill ${record.skillId}`);
+    return execution.id;
   } catch (error: any) {
-    console.error(`[DB] Unexpected error in upsertResult:`, error);
+    console.error('[DB] Failed to create execution:', error.message);
     throw error;
   }
 }
 
 /**
- * Get result record by requestId
+ * Update execution with result (success or failure)
  *
- * @param requestId - Request identifier
- * @returns Result record or null if not found
+ * @param executionId - ID of the execution to update
+ * @param result - Result data
  */
-export async function getResult(requestId: string): Promise<ResultRecord | null> {
-  if (!isSupabaseConfigured()) {
-    console.warn('[DB] Supabase not configured - cannot fetch result');
-    return null;
+export async function updateExecution(
+  executionId: string,
+  result: {
+    status: 'completed' | 'failed';
+    output?: string;
+    trace?: any[];
+    error?: string;
+    durationMs?: number;
+    tokenCount?: number;
   }
-
+): Promise<void> {
   try {
-    console.log(`[DB] Fetching result for requestId: ${requestId}`);
+    const prisma = getPrismaClient();
 
-    const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from('results')
-      .select('*')
-      .eq('request_id', requestId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+    await prisma.execution.update({
+      where: { id: executionId },
+      data: {
+        status: result.status,
+        output: result.output,
+        trace: result.trace,
+        error: result.error,
+        durationMs: result.durationMs,
+        tokenCount: result.tokenCount,
+        completedAt: new Date(),
+      },
+    });
 
-    if (error) {
-      if (error.code === 'PGRST116') {
-        console.log(`[DB] No result found for requestId: ${requestId}`);
-        return null;
-      }
-      console.error(`[DB] Error fetching result:`, error);
-      throw error;
+    // Also update the skill's run count and last run time
+    const execution = await prisma.execution.findUnique({
+      where: { id: executionId },
+      select: { skillId: true },
+    });
+
+    if (execution?.skillId) {
+      await prisma.skill.update({
+        where: { id: execution.skillId },
+        data: {
+          runCount: { increment: 1 },
+          lastRunAt: new Date(),
+        },
+      });
     }
 
-    console.log(`[DB] Found result for requestId: ${requestId}`);
-
-    return {
-      text: data.text,
-      requestId: data.request_id,
-      files: data.files || [],
-      metadata: data.metadata,
-    };
+    console.log(`[DB] Updated execution ${executionId} with status: ${result.status}`);
   } catch (error: any) {
-    console.error(`[DB] Unexpected error in getResult:`, error);
-    throw error;
+    console.error('[DB] Failed to update execution:', error.message);
+    // Non-fatal - don't throw
+  }
+}
+
+/**
+ * Legacy function for compatibility - creates execution record
+ * Maps old ResultRecord format to new Execution format
+ *
+ * @param record - Result record (legacy format)
+ */
+export async function upsertResult(record: {
+  requestId: string;
+  text: string;
+  files: FileMetadata[];
+  metadata?: Record<string, any>;
+}): Promise<void> {
+  // For one-off agents without skill matching, we log but don't create execution
+  // since there's no skill to associate with
+  console.log(`[DB] Result for requestId ${record.requestId}:`);
+  console.log(`[DB]   - Text length: ${record.text.length} chars`);
+  console.log(`[DB]   - Files count: ${record.files.length}`);
+
+  // If metadata contains executionId, update that execution
+  if (record.metadata?.executionId) {
+    await updateExecution(record.metadata.executionId, {
+      status: 'completed',
+      output: record.text,
+      durationMs: record.metadata.durationMs,
+    });
   }
 }
 
@@ -98,92 +146,207 @@ export async function getResult(requestId: string): Promise<ResultRecord | null>
  * Health check - verify database connection
  */
 export async function checkDatabaseHealth(): Promise<boolean> {
-  if (!isSupabaseConfigured()) {
-    console.warn('[DB] Supabase not configured - health check skipped');
-    return true; // Return true so server starts without DB
-  }
-
-  try {
-    console.log('[DB] Running health check...');
-
-    const supabase = getSupabaseClient();
-    const { error } = await supabase.from('results').select('request_id').limit(1);
-
-    if (error) {
-      console.error('[DB] Health check failed:', error);
-      return false;
-    }
-
-    console.log('[DB] Health check passed');
-    return true;
-  } catch (error) {
-    console.error('[DB] Health check exception:', error);
-    return false;
-  }
+  return healthCheck();
 }
 
 /**
- * Fetch all available workflows
+ * Fetch all active skills as workflows
+ * Skills with isActive=true are available for workflow matching
  *
- * @returns Array of workflows (id, name, description only)
+ * @returns Array of skills (id, name, description only)
  */
 export async function getAllWorkflows(): Promise<
   Pick<Workflow, 'id' | 'name' | 'description'>[]
 > {
-  if (!isSupabaseConfigured()) {
-    console.warn('[DB] Supabase not configured - cannot fetch workflows');
-    return [];
-  }
-
   try {
-    const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from('workflows')
-      .select('id, name, description')
-      .order('name');
+    const prisma = getPrismaClient();
 
-    if (error) {
-      console.error('[DB] Failed to fetch workflows:', error);
-      return [];
-    }
+    const skills = await prisma.skill.findMany({
+      where: {
+        isActive: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+      },
+      orderBy: {
+        name: 'asc',
+      },
+    });
 
-    console.log(`[DB] Fetched ${data?.length || 0} workflows`);
-    return data || [];
-  } catch (error) {
-    console.error('[DB] Unexpected error fetching workflows:', error);
+    console.log(`[DB] Fetched ${skills.length} active skills as workflows`);
+
+    return skills.map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      description: skill.description || '',
+    }));
+  } catch (error: any) {
+    console.error('[DB] Failed to fetch skills:', error.message);
     return [];
   }
 }
 
 /**
- * Fetch workflow by ID with full steps
+ * Fetch skill by ID with full steps (as Workflow)
  *
- * @param id - Workflow ID
+ * @param id - Skill ID
  * @returns Complete workflow with steps, or null if not found
  */
 export async function getWorkflowById(id: string): Promise<Workflow | null> {
-  if (!isSupabaseConfigured()) {
-    console.warn('[DB] Supabase not configured - cannot fetch workflow');
-    return null;
-  }
-
   try {
-    const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from('workflows')
-      .select('*')
-      .eq('id', id)
-      .single();
+    const prisma = getPrismaClient();
 
-    if (error || !data) {
-      console.error('[DB] Failed to fetch workflow:', error);
+    const skill = await prisma.skill.findUnique({
+      where: { id },
+    });
+
+    if (!skill) {
+      console.log(`[DB] Skill not found: ${id}`);
       return null;
     }
 
-    console.log(`[DB] Fetched workflow: ${data.name}`);
-    return data as Workflow;
-  } catch (error) {
-    console.error('[DB] Unexpected error fetching workflow:', error);
+    console.log(`[DB] Fetched skill: ${skill.name}`);
+
+    // Map Skill to Workflow interface
+    return {
+      id: skill.id,
+      name: skill.name,
+      description: skill.description || '',
+      steps: (skill.steps as unknown as WorkflowStep[]) || [],
+      created_at: skill.createdAt.toISOString(),
+    };
+  } catch (error: any) {
+    console.error('[DB] Failed to fetch skill:', error.message);
     return null;
+  }
+}
+
+/**
+ * Get result (execution) by requestId
+ * For compatibility with existing code that queries results
+ *
+ * @param requestId - Request identifier (stored in execution input)
+ * @returns Execution data or null
+ */
+export async function getResult(requestId: string): Promise<{
+  text: string;
+  requestId: string;
+  files: FileMetadata[];
+  metadata?: Record<string, any>;
+} | null> {
+  try {
+    const prisma = getPrismaClient();
+
+    // Search executions by requestId in input JSON
+    const executions = await prisma.execution.findMany({
+      where: {
+        input: {
+          path: ['requestId'],
+          equals: requestId,
+        },
+      },
+      orderBy: {
+        startedAt: 'desc',
+      },
+      take: 1,
+    });
+
+    if (executions.length === 0) {
+      console.log(`[DB] No execution found for requestId: ${requestId}`);
+      return null;
+    }
+
+    const execution = executions[0];
+
+    return {
+      text: execution.output || '',
+      requestId,
+      files: [], // Files not stored in executions currently
+      metadata: {
+        executionId: execution.id,
+        skillId: execution.skillId,
+        status: execution.status,
+        durationMs: execution.durationMs,
+      },
+    };
+  } catch (error: any) {
+    console.error('[DB] Failed to get result:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Get execution by ID
+ *
+ * @param id - Execution ID
+ * @returns Execution record or null
+ */
+export async function getExecutionById(id: string): Promise<ExecutionRecord | null> {
+  try {
+    const prisma = getPrismaClient();
+
+    const execution = await prisma.execution.findUnique({
+      where: { id },
+    });
+
+    if (!execution) {
+      return null;
+    }
+
+    return {
+      skillId: execution.skillId,
+      requestId: (execution.input as any)?.requestId || id,
+      status: execution.status as ExecutionRecord['status'],
+      trigger: execution.trigger as ExecutionRecord['trigger'],
+      input: execution.input as Record<string, any>,
+      output: execution.output || undefined,
+      trace: execution.trace as any[],
+      error: execution.error || undefined,
+      durationMs: execution.durationMs || undefined,
+      tokenCount: execution.tokenCount || undefined,
+    };
+  } catch (error: any) {
+    console.error('[DB] Failed to get execution:', error.message);
+    return null;
+  }
+}
+
+/**
+ * List recent executions for a skill
+ *
+ * @param skillId - Skill ID
+ * @param limit - Max number of executions to return
+ * @returns Array of execution records
+ */
+export async function getExecutionsForSkill(
+  skillId: string,
+  limit: number = 10
+): Promise<ExecutionRecord[]> {
+  try {
+    const prisma = getPrismaClient();
+
+    const executions = await prisma.execution.findMany({
+      where: { skillId },
+      orderBy: { startedAt: 'desc' },
+      take: limit,
+    });
+
+    return executions.map((e) => ({
+      skillId: e.skillId,
+      requestId: (e.input as any)?.requestId || e.id,
+      status: e.status as ExecutionRecord['status'],
+      trigger: e.trigger as ExecutionRecord['trigger'],
+      input: e.input as Record<string, any>,
+      output: e.output || undefined,
+      trace: e.trace as any[],
+      error: e.error || undefined,
+      durationMs: e.durationMs || undefined,
+      tokenCount: e.tokenCount || undefined,
+    }));
+  } catch (error: any) {
+    console.error('[DB] Failed to get executions:', error.message);
+    return [];
   }
 }
