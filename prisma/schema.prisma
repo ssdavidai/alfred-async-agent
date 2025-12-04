@@ -1,0 +1,149 @@
+// User VM Database Schema
+// SECURITY: This database contains ALL user secrets (encrypted at rest)
+// This VM is isolated per user - no other user can access this data
+// Credentials are encrypted using VM_ENCRYPTION_SECRET (stays on VM only)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// MCP connections and external service integrations
+/// CRITICAL: config field contains REAL SECRETS (encrypted)
+/// Each connection represents an MCP server or API integration
+model Connection {
+  id          String    @id @default(uuid())
+  /// Connection name (e.g., 'NocoDB', 'Notion', 'Slack', 'GitHub')
+  name        String    @unique
+  /// Connection type: 'mcp_stdio', 'mcp_http', 'http_api'
+  type        String
+  /// CONTAINS ENCRYPTED CREDENTIALS
+  /// For mcp_stdio: {command, args, env: {API_KEY: "encrypted:xxx"}}
+  /// For mcp_http: {url, headers: {Authorization: "encrypted:xxx"}}
+  /// For http_api: {baseUrl, auth: {token: "encrypted:xxx"}}
+  config      Json
+  /// Available tools from this connection (discovered via MCP)
+  /// Example: ["nocodb__list_records", "nocodb__create_record"]
+  tools       String[]  @default([])
+  /// Whether this connection is currently active
+  isActive    Boolean   @default(true) @map("is_active")
+  /// Last time this connection was used in a skill execution
+  lastUsedAt  DateTime? @map("last_used_at")
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  skills      Skill[]   @relation("SkillConnections")
+
+  @@index([type])
+  @@index([isActive])
+  @@map("connections")
+}
+
+/// User-defined workflows (Skills)
+/// Can be created manually, from templates, or via "Teach New Skill"
+model Skill {
+  id              String    @id @default(uuid())
+  /// Reference to Alfred Core skill template (if installed from marketplace)
+  templateId      String?   @map("template_id")
+  /// Skill name (user-facing)
+  name            String
+  /// User-provided description of what this skill does
+  description     String?
+  /// How this skill is triggered: 'manual', 'schedule', 'webhook', 'chat'
+  triggerType     String    @map("trigger_type")
+  /// Trigger configuration
+  /// For schedule: {cron: "0 9 * * *"}
+  /// For webhook: {secret: "xxx", allowedOrigins: ["..."]}
+  triggerConfig   Json?     @map("trigger_config")
+  /// Workflow steps array
+  /// Format: [{"id": 1, "prompt": "...", "guidance": "...", "allowedTools": [...]}]
+  steps           Json
+  /// Connection names this skill uses (e.g., ["Notion", "Slack"])
+  /// Used to build dynamic MCP configuration before execution
+  connectionNames String[]  @default([]) @map("connection_names")
+  /// System skills (like "Teach New Skill") cannot be deleted
+  isSystem        Boolean   @default(false) @map("is_system")
+  /// Whether this skill is currently active
+  isActive        Boolean   @default(true) @map("is_active")
+  /// Number of times this skill has been executed
+  runCount        Int       @default(0) @map("run_count")
+  /// Last execution timestamp
+  lastRunAt       DateTime? @map("last_run_at")
+
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  executions      Execution[]
+  connections     Connection[] @relation("SkillConnections")
+
+  @@index([triggerType])
+  @@index([isActive])
+  @@index([isSystem])
+  @@map("skills")
+}
+
+/// Skill execution history with full traces
+/// CONTAINS FULL EXECUTION DATA (inputs, outputs, traces)
+/// This is the audit log for debugging and compliance
+model Execution {
+  id            String    @id @default(uuid())
+  skillId       String    @map("skill_id")
+  skill         Skill     @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  /// Execution status: 'running', 'completed', 'failed'
+  status        String
+  /// How was this triggered: 'manual', 'schedule', 'webhook', 'chat'
+  trigger       String
+  /// FULL input data passed to the skill
+  input         Json?
+  /// FULL output/result from the skill execution
+  output        String?
+  /// FULL conversation trace from Claude Agent SDK
+  /// Contains all messages, tool calls, and responses
+  trace         Json?
+  /// Error message if execution failed
+  error         String?
+
+  startedAt     DateTime  @default(now()) @map("started_at")
+  completedAt   DateTime? @map("completed_at")
+  /// Execution duration in milliseconds
+  durationMs    Int?      @map("duration_ms")
+  /// Total tokens consumed (for cost tracking)
+  tokenCount    Int?      @map("token_count")
+  /// Estimated cost in USD
+  costUsd       Decimal?  @map("cost_usd") @db.Decimal(10, 6)
+  /// Whether metrics have been reported to Alfred Core
+  /// (only counts/duration, NOT content)
+  reportedToCore Boolean @default(false) @map("reported_to_core")
+
+  @@index([skillId, startedAt])
+  @@index([status])
+  @@index([trigger])
+  @@index([reportedToCore])
+  @@map("executions")
+}
+
+/// VM configuration key-value store
+/// CRITICAL: All values are encrypted at rest
+/// Contains Anthropic API key, VM secrets, Alfred Core public key
+model Config {
+  /// Configuration key (e.g., 'anthropic_api_key', 'vm_auth_secret')
+  key       String    @id
+  /// Encrypted value (prefixed with 'encrypted:')
+  /// Examples:
+  /// - anthropic_api_key: "encrypted:sk-ant-..."
+  /// - vm_auth_secret: "plain:xxx" (sent to Core as bcrypt hash)
+  /// - vm_encryption_secret: "plain:aes-256-key" (NEVER leaves VM)
+  /// - alfred_core_public_key: "plain:-----BEGIN PUBLIC KEY-----..."
+  value     String
+  updatedAt DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@map("config")
+}
