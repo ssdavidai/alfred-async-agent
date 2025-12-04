@@ -7,6 +7,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { webhookHandler } from './webhook.js';
+import { getConfig, saveConfig } from './config.js';
 import { loggingMiddleware } from './middleware/logging.js';
 import { timeoutMiddleware } from './middleware/timeout.js';
 import {
@@ -96,6 +97,10 @@ app.get(
     });
   })
 );
+
+// Config endpoints
+app.get('/api/config', asyncHandler(getConfig));
+app.post('/api/config', asyncHandler(saveConfig));
 
 // 404 handler
 app.use(notFoundHandler);
