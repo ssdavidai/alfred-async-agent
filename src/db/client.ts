@@ -10,7 +10,10 @@
  * SECURITY: Contains encrypted credentials - logs sanitized errors only.
  */
 
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, Prisma } from '@prisma/client';
+
+// Type for Prisma transaction client
+export type TransactionClient = Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>;
 
 /**
  * Database client configuration
@@ -140,7 +143,7 @@ export async function transaction<T>(
   operations: (tx: PrismaClient) => Promise<T>
 ): Promise<T> {
   const client = getPrismaClient();
-  return client.$transaction(async (tx: any) => {
+  return client.$transaction(async (tx: TransactionClient) => {
     return operations(tx as PrismaClient);
   });
 }

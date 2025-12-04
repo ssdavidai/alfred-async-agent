@@ -5,7 +5,7 @@
  */
 
 import { PrismaClient } from '@prisma/client';
-import { getPrismaClient } from './client.js';
+import { getPrismaClient, TransactionClient } from './client.js';
 
 /**
  * Prisma error codes
@@ -179,7 +179,7 @@ export async function createSkillExecution(
 ) {
   const client = getPrismaClient();
 
-  return client.$transaction(async (tx: any) => {
+  return client.$transaction(async (tx: TransactionClient) => {
     // Create execution record
     const execution = await tx.execution.create({
       data: {
