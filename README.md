@@ -74,6 +74,7 @@ Server metrics endpoint.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes | - | PostgreSQL connection string |
 | `ANTHROPIC_API_KEY` | Yes | - | Anthropic API key |
 | `PORT` | No | 3001 | Server port |
 | `AGENT_MODEL` | No | claude-sonnet-4-20250514 | Claude model to use |
@@ -83,6 +84,122 @@ Server metrics endpoint.
 | `MCP_CONNECTIONS` | No | {} | JSON-encoded MCP server configurations |
 
 See `.env.example` for all options.
+
+### Database Client
+
+Async Agent uses a Prisma-based database client with connection pooling optimized for single-tenant VM workloads.
+
+#### Connection Pool Settings
+
+- **Pool Size**: 5 connections (single-tenant, lower concurrency)
+- **Connection Timeout**: 5 seconds
+- **Query Timeout**: 15 seconds (allows for complex workflow queries)
+
+#### Database Configuration
+
+```bash
+DATABASE_URL="postgresql://user:password@localhost:5432/async_agent?schema=public&connection_limit=5"
+```
+
+#### Usage Examples
+
+**Basic Usage:**
+
+```typescript
+import prisma from './src/db/client';
+
+// Query skills
+const skills = await prisma.skill.findMany({
+  where: { isActive: true },
+});
+
+// Get skill with connections
+const skill = await prisma.skill.findUnique({
+  where: { id: skillId },
+  include: { connections: true },
+});
+```
+
+**Health Check:**
+
+```typescript
+import { healthCheck } from './src/db/client';
+
+const isHealthy = await healthCheck();
+```
+
+**Transactions for Skill Execution:**
+
+```typescript
+import { transaction } from './src/db/client';
+
+const execution = await transaction(async (tx) => {
+  // Create execution record
+  const exec = await tx.execution.create({
+    data: {
+      skillId,
+      status: 'running',
+      trigger: 'manual',
+    },
+  });
+
+  // Update skill metadata
+  await tx.skill.update({
+    where: { id: skillId },
+    data: {
+      runCount: { increment: 1 },
+      lastRunAt: new Date(),
+    },
+  });
+
+  return exec;
+});
+```
+
+**Skill Execution Helpers:**
+
+```typescript
+import { createSkillExecution, completeSkillExecution } from './src/db/utils';
+
+// Start execution (atomic with skill update)
+const execution = await createSkillExecution('skill-123', {
+  trigger: 'webhook',
+  input: { data: 'test' },
+});
+
+// Complete execution
+await completeSkillExecution(execution.id, {
+  status: 'completed',
+  output: 'Success',
+  trace: { steps: [] },
+  durationMs: 1500,
+  tokenCount: 250,
+  costUsd: 0.01,
+});
+```
+
+#### Database Schema
+
+The Prisma schema is located at `prisma/schema.prisma`. Key entities:
+
+- **Connection** - MCP connections with encrypted credentials
+- **Skill** - User workflows with steps and trigger configuration
+- **Execution** - Full execution history with traces
+- **Config** - Encrypted key-value store for VM secrets
+
+#### Migrations
+
+Apply database migrations:
+
+```bash
+npx prisma migrate deploy
+```
+
+Generate Prisma client after schema changes:
+
+```bash
+npx prisma generate
+```
 
 ### Prompts
 
