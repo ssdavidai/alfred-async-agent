@@ -9,6 +9,7 @@ import fs from 'fs/promises';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { AgentResponse, McpConnections } from './types.js';
 import { config } from './config/index.js';
+import { getAnthropicApiKey } from './config.js';
 import {
   extractResponseText,
   getDefaultSystemPrompt,
@@ -48,6 +49,15 @@ export async function executeAgent(
   const workingDirectory = `/tmp/${requestId}-${timestamp}`;
 
   try {
+    // Fetch API key from database at runtime
+    const apiKey = await getAnthropicApiKey();
+    if (!apiKey) {
+      throw new Error('Anthropic API key not configured. Please set up your API key in the configuration.');
+    }
+    // Set API key in environment for Claude Agent SDK
+    process.env.ANTHROPIC_API_KEY = apiKey;
+    console.log(`[Agent] API key loaded from database`);
+
     // Create unique working directory
     await fs.mkdir(workingDirectory, { recursive: true });
     console.log(`[Agent] Created working directory: ${workingDirectory}`);

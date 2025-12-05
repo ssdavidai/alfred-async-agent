@@ -117,10 +117,10 @@ export function validateConfig(): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  // Required fields
+  // API key can be loaded from database at runtime, so this is just a warning
   if (!config.agent.apiKey) {
-    errors.push(
-      'ANTHROPIC_API_KEY is not set - agent execution will fail'
+    warnings.push(
+      'ANTHROPIC_API_KEY env var is not set - will be loaded from database at runtime'
     );
   }
 
