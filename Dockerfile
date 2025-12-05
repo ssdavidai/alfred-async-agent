@@ -19,8 +19,11 @@ FROM node:20-alpine AS runner
 
 WORKDIR /app
 
-# Install curl for healthcheck and openssl for Prisma
-RUN apk add --no-cache curl openssl
+# Install curl for healthcheck, openssl for Prisma, and dependencies for Claude Code
+RUN apk add --no-cache curl openssl bash git
+
+# Install Claude Code CLI globally (required by Claude Agent SDK)
+RUN npm install -g @anthropic-ai/claude-code
 
 # Copy built files and dependencies
 COPY --from=builder /app/dist ./dist
